@@ -1,0 +1,44 @@
+---
+description: 
+alwaysApply: true
+enabled: true
+updatedAt: 2026-02-28T07:55:32.608Z
+provider: 
+---
+
+# 开发完成后自动提交 Commit
+
+每次完成一个开发任务后，**必须**自动执行 git commit 流程，无需等待用户要求。
+
+## 提交流程
+
+1. **确认任务完成**：代码编写/修改完毕，测试通过（如有测试）
+2. **暂存变更**：`git add` 相关文件（只添加本次任务涉及的文件，不要 `git add .`）
+3. **生成 commit message**：遵循 Conventional Commits 规范
+4. **执行提交**：`git commit -m "<message>"`
+
+## Commit Message 规范
+
+格式：`<type>(<scope>): <description>`
+
+常用 type：
+- `feat`: 新功能
+- `fix`: 修复 bug
+- `refactor`: 重构
+- `test`: 添加/修改测试
+- `docs`: 文档变更
+- `chore`: 构建/工具/依赖变更
+- `style`: 代码格式调整
+
+示例：
+- `feat(multi): implement pipeline multi-agent mode`
+- `fix(agent): fix tool call parsing in text mode`
+- `test: add unit tests for shared state`
+- `refactor(llm): simplify retry logic`
+
+## 注意事项
+
+- **不要执行 `git push`**，只提交到本地，推送由用户决定
+- 如果变更涉及多个不相关的功能，拆分为多次 commit
+- commit message 使用英文，简洁准确描述变更内容
+- 如果测试未通过，先修复再提交
