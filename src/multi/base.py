@@ -66,9 +66,8 @@ class BaseMultiAgent(ABC):
             mode=agent_kwargs.pop("mode", "function_calling"),
             max_steps=agent_kwargs.pop("max_steps", 10),
             verbose=False,  # 由 MultiAgent 统一控制日志
+            system_prompt=self._build_system_prompt(role),
         )
-        # 覆盖 agent 的系统提示词（通过修改 prompt 模块的方式）
-        agent._role_system_prompt = role.system_prompt
         agent._role_name = role.name
         self._agents[role.name] = agent
 
@@ -80,6 +79,16 @@ class BaseMultiAgent(ABC):
     def agent_names(self) -> list[str]:
         """所有已注册的 Agent 名称。"""
         return list(self._agents.keys())
+
+    @staticmethod
+    def _build_system_prompt(role: AgentRole) -> str:
+        """将角色提示词与通用 Agent 指令合并为完整的 system prompt。"""
+        from src.agent.prompt import SYSTEM_PROMPT_FUNCTION_CALLING
+
+        return (
+            f"{role.system_prompt}\n\n"
+            f"{SYSTEM_PROMPT_FUNCTION_CALLING}"
+        )
 
     # ================================================================
     # 核心接口
@@ -124,14 +133,9 @@ class BaseMultiAgent(ABC):
             msg_type=MessageType.TASK,
         ))
 
-        # 构建带角色提示词的任务
-        role_prompt = getattr(agent, "_role_system_prompt", "")
-        full_task = task
-        if role_prompt:
-            full_task = f"[系统角色指令]\n{role_prompt}\n\n[当前任务]\n{task}"
-
+        # 角色 prompt 已通过 system_prompt 参数注入，直接执行任务
         try:
-            result = agent.run(full_task)
+            result = agent.run(task)
         except Exception as e:
             result = f"错误：Agent '{agent_name}' 执行失败：{e}"
             self._fire_hook("on_error", agent_name=agent_name, error=e)

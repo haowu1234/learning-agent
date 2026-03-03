@@ -30,6 +30,7 @@ class ReActAgent:
         mode: str = "function_calling",
         max_steps: int = 10,
         verbose: bool = True,
+        system_prompt: str | None = None,
     ):
         """
         Args:
@@ -38,12 +39,14 @@ class ReActAgent:
             mode: 工具调用模式，'function_calling' 或 'text_parsing'。
             max_steps: 最大推理步数，防止无限循环。
             verbose: 是否打印中间推理过程。
+            system_prompt: 自定义系统提示词，为 None 时使用默认模板。
         """
         self.llm = llm
         self.tools = tool_registry
         self.mode = mode
         self.max_steps = max_steps
         self.verbose = verbose
+        self.system_prompt = system_prompt
         self.history = ConversationHistory()
 
     def run(self, query: str) -> str:
@@ -68,8 +71,9 @@ class ReActAgent:
 
     def _run_function_calling(self, query: str) -> str:
         """使用 OpenAI Function Calling 模式运行 Agent。"""
+        sys_prompt = self.system_prompt or SYSTEM_PROMPT_FUNCTION_CALLING
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": SYSTEM_PROMPT_FUNCTION_CALLING},
+            {"role": "system", "content": sys_prompt},
         ]
         # 加入对话历史
         messages.extend(self.history.get_messages())
@@ -151,9 +155,23 @@ class ReActAgent:
         LLM 被引导输出特定格式的文本，Agent 用正则表达式提取工具调用信息。
         这种方式不依赖 Function Calling 特性，兼容所有 LLM。
         """
-        system_prompt = SYSTEM_PROMPT_TEXT_PARSING.format(
-            tools_description=self.tools.get_tools_description()
-        )
+        if self.system_prompt:
+            # 有自定义 system_prompt 时，在末尾追加工具说明和格式要求
+            system_prompt = (
+                f"{self.system_prompt}\n\n"
+                f"可用工具：\n{self.tools.get_tools_description()}\n\n"
+                "你必须严格按照以下格式回答：\n"
+                "Thought: <你的思考过程>\n"
+                "Action: <要调用的工具名称>\n"
+                "Action Input: <工具的参数，JSON 格式>\n\n"
+                "当你准备好给出最终答案时：\n"
+                "Thought: <最终思考>\n"
+                "Final Answer: <你的最终回答>"
+            )
+        else:
+            system_prompt = SYSTEM_PROMPT_TEXT_PARSING.format(
+                tools_description=self.tools.get_tools_description()
+            )
 
         # 构建初始上下文
         context = f"Question: {query}\n"
