@@ -59,6 +59,18 @@ class _FakeResponse:
         self.choices = [_FakeChoice(_FakeMessage(content, tool_calls))]
 
 
+class _FakeToolFunction:
+    def __init__(self, name: str, arguments: str):
+        self.name = name
+        self.arguments = arguments
+
+
+class _FakeToolCall:
+    def __init__(self, tool_id: str, name: str, arguments: str):
+        self.id = tool_id
+        self.function = _FakeToolFunction(name, arguments)
+
+
 class FakeLLM:
     """用于测试 Agent 的轻量级 LLM 替身。"""
 
@@ -77,8 +89,10 @@ class FakeLLM:
                 "max_tokens": max_tokens,
             }
         )
-        content = self.chat_responses.pop(0) if self.chat_responses else ""
-        return _FakeResponse(content=content)
+        response = self.chat_responses.pop(0) if self.chat_responses else ""
+        if isinstance(response, _FakeResponse):
+            return response
+        return _FakeResponse(content=response)
 
     def chat_simple(self, prompt: str, system: str = "") -> str:
         self.simple_calls.append((prompt, system))
@@ -175,6 +189,30 @@ class TestReActAgentModes(unittest.TestCase):
             agent.run("测试")
 
         self.assertIn("plan_and_execute", str(context.exception))
+
+    def test_run_with_trace_collects_tool_calls_in_function_calling(self):
+        fake_llm = FakeLLM(
+            chat_responses=[
+                _FakeResponse(tool_calls=[
+                    _FakeToolCall("call_1", "calculator", '{"expression": "2+3"}')
+                ]),
+                _FakeResponse(content="最终答案是 5。"),
+            ]
+        )
+        agent = ReActAgent(
+            llm=fake_llm,
+            tool_registry=self.registry,
+            mode="function_calling",
+            verbose=False,
+        )
+
+        result = agent.run_with_trace("请计算 2+3")
+
+        self.assertEqual(result.final_answer, "最终答案是 5。")
+        self.assertEqual(len(result.tool_traces), 1)
+        self.assertEqual(result.tool_traces[0].tool_name, "calculator")
+        self.assertIn('"expression": "2+3"', result.tool_traces[0].tool_input)
+        self.assertIn("5", result.tool_traces[0].observation)
 
     def test_plan_and_execute_runs_planner_executor_summarizer_and_verifier(self):
         fake_llm = FakeLLM(

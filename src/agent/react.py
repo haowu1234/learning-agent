@@ -20,6 +20,7 @@ from src.agent.prompt import (
     SYSTEM_PROMPT_PLAN_AND_EXECUTE_VERIFIER,
     SYSTEM_PROMPT_TEXT_PARSING,
 )
+from src.agent.state import AgentRunResult, PlanExecutionState, StepRun, ToolTrace, VerificationResult
 from src.llm import LLMClient
 from src.memory.history import ConversationHistory
 from src.tools.base import ToolRegistry
@@ -74,6 +75,10 @@ class ReActAgent:
 
     def run(self, query: str) -> str:
         """运行 Agent 处理用户查询。"""
+        return self.run_with_trace(query).final_answer
+
+    def run_with_trace(self, query: str) -> AgentRunResult:
+        """运行 Agent，并返回结构化执行轨迹。"""
         self._validate_mode_config()
 
         if self.mode == "function_calling":
@@ -96,7 +101,7 @@ class ReActAgent:
     # 模式 1：OpenAI Function Calling
     # ================================================================
 
-    def _run_function_calling(self, query: str) -> str:
+    def _run_function_calling(self, query: str) -> AgentRunResult:
         """使用 OpenAI Function Calling 模式运行 Agent。"""
         sys_prompt = self.system_prompt or SYSTEM_PROMPT_FUNCTION_CALLING
         messages: list[dict[str, Any]] = [
@@ -106,6 +111,7 @@ class ReActAgent:
         messages.append({"role": "user", "content": query})
 
         openai_tools = self.tools.to_openai_tools()
+        tool_traces: list[ToolTrace] = []
 
         self._log(f"\n{'='*60}")
         self._log(f"用户问题: {query}")
@@ -139,7 +145,11 @@ class ReActAgent:
                 final_answer = message.content or ""
                 self._log(f"\n最终回答: {final_answer}")
                 self._save_to_history(query, final_answer)
-                return final_answer
+                return AgentRunResult(
+                    final_answer=final_answer,
+                    tool_traces=tool_traces,
+                    raw_output=message.content or "",
+                )
 
             for tool_call in message.tool_calls:
                 func_name = tool_call.function.name
@@ -150,6 +160,11 @@ class ReActAgent:
                 self._log(f"  Action Input: {func_args}")
 
                 observation = self.tools.execute(func_name, func_args)
+                tool_traces.append(ToolTrace(
+                    tool_name=func_name,
+                    tool_input=func_args,
+                    observation=observation,
+                ))
                 self._log(f"  Observation: {observation}")
 
                 messages.append({
@@ -159,13 +174,17 @@ class ReActAgent:
                 })
 
         self._save_to_history(query, DEFAULT_FALLBACK_MESSAGE)
-        return DEFAULT_FALLBACK_MESSAGE
+        return AgentRunResult(
+            final_answer=DEFAULT_FALLBACK_MESSAGE,
+            tool_traces=tool_traces,
+            notes=["达到最大推理步数后回退到默认回答。"],
+        )
 
     # ================================================================
     # 模式 2：纯文本解析
     # ================================================================
 
-    def _run_text_parsing(self, query: str) -> str:
+    def _run_text_parsing(self, query: str) -> AgentRunResult:
         """使用纯文本解析模式运行 Agent。"""
         system_prompt = self._build_text_parsing_system_prompt()
         context = f"Question: {query}\n"
@@ -175,6 +194,7 @@ class ReActAgent:
         ]
         messages.extend(self.history.get_messages())
         messages.append({"role": "user", "content": context})
+        tool_traces: list[ToolTrace] = []
 
         self._log(f"\n{'='*60}")
         self._log(f"用户问题: {query}")
@@ -192,14 +212,22 @@ class ReActAgent:
                 final_answer = final_match.group(1).strip()
                 self._log(f"\n最终回答: {final_answer}")
                 self._save_to_history(query, final_answer)
-                return final_answer
+                return AgentRunResult(
+                    final_answer=final_answer,
+                    tool_traces=tool_traces,
+                    raw_output=text,
+                )
 
             action_match = re.search(r"Action:\s*(\w+)", text)
             input_match = re.search(r"Action Input:\s*({.*?})", text, re.DOTALL)
 
             if not action_match:
                 self._save_to_history(query, text)
-                return text
+                return AgentRunResult(
+                    final_answer=text,
+                    tool_traces=tool_traces,
+                    raw_output=text,
+                )
 
             action_name = action_match.group(1)
             action_input = input_match.group(1) if input_match else "{}"
@@ -208,6 +236,11 @@ class ReActAgent:
             self._log(f"  Action Input: {action_input}")
 
             observation = self.tools.execute(action_name, action_input)
+            tool_traces.append(ToolTrace(
+                tool_name=action_name,
+                tool_input=action_input,
+                observation=observation,
+            ))
             self._log(f"  Observation: {observation}")
 
             messages.append({"role": "assistant", "content": text})
@@ -217,13 +250,17 @@ class ReActAgent:
             })
 
         self._save_to_history(query, DEFAULT_FALLBACK_MESSAGE)
-        return DEFAULT_FALLBACK_MESSAGE
+        return AgentRunResult(
+            final_answer=DEFAULT_FALLBACK_MESSAGE,
+            tool_traces=tool_traces,
+            notes=["达到最大推理步数后回退到默认回答。"],
+        )
 
     # ================================================================
     # 模式 3：Plan-and-Execute
     # ================================================================
 
-    def _run_plan_and_execute(self, query: str) -> str:
+    def _run_plan_and_execute(self, query: str) -> AgentRunResult:
         """先规划，再逐步执行、验证、反思并在必要时重规划。"""
         self._log(f"\n{'='*60}")
         self._log(f"用户问题: {query}")
@@ -233,58 +270,82 @@ class ReActAgent:
         self._log(f"最大重规划次数: {self.max_replans}")
         self._log(f"{'='*60}")
 
-        working_query = query
+        state = PlanExecutionState(original_query=query, working_query=query)
         total_attempts = self.max_replans + 1
-        last_answer = DEFAULT_FALLBACK_MESSAGE
+        last_result = AgentRunResult(final_answer=DEFAULT_FALLBACK_MESSAGE)
 
         for attempt in range(1, total_attempts + 1):
+            state.attempt = attempt
             self._log(f"\n=== Plan-and-Execute 尝试 {attempt}/{total_attempts} ===")
             if attempt > 1:
                 self._log("🔁 根据上轮复盘重新规划...")
-                self._log(self._indent(working_query))
+                self._log(self._indent(state.working_query))
 
-            plan = self._plan(working_query)
-            results: list[dict[str, str]] = []
+            plan = self._plan(state.working_query)
+            state.current_plan = plan
+            step_runs: list[StepRun] = []
 
             if not plan:
                 self._log("\n⚠️  规划失败，回退到直接执行。")
-                final_answer = self._run_sub_agent(working_query, self.executor_mode)
+                direct_result = self._run_sub_agent(state.working_query, self.executor_mode)
+                direct_step = StepRun(
+                    step_id=f"attempt-{attempt}-direct",
+                    title="直接执行",
+                    task=state.working_query,
+                    final_answer=direct_result.final_answer,
+                    status="failed" if direct_result.final_answer.startswith("错误：") else "done",
+                    tool_traces=direct_result.tool_traces,
+                    notes=direct_result.notes,
+                )
+                step_runs = [direct_step]
+                self._remember_step_runs(state, step_runs)
+                final_answer = direct_result.final_answer
             else:
                 self._log_plan(plan)
-                results = self._execute_plan_steps(working_query, plan)
-                final_answer = self._summarize_plan_execution(query, working_query, plan, results)
+                step_runs = self._execute_plan_steps(state, plan)
+                final_answer = self._summarize_plan_execution(
+                    query,
+                    state.working_query,
+                    plan,
+                    step_runs,
+                )
 
-            last_answer = final_answer
+            state.last_attempt_steps = step_runs
+            state.candidate_answer = final_answer
+            last_result = self._build_plan_execution_result(final_answer, state)
             self._log(f"\n候选回答: {final_answer}")
 
             verification = self._verify_plan_execution(
                 original_query=query,
-                working_query=working_query,
+                working_query=state.working_query,
                 plan=plan,
-                results=results,
+                results=step_runs,
                 final_answer=final_answer,
             )
-            if verification["passed"]:
+            state.verification = verification
+            last_result = self._build_plan_execution_result(final_answer, state)
+            if verification.passed:
                 self._log(f"\n最终回答: {final_answer}")
                 self._save_to_history(query, final_answer)
-                return final_answer
+                return last_result
 
             if attempt >= total_attempts:
                 self._log("\n⚠️  已达到最大重规划次数，返回最后一次候选回答。")
                 self._save_to_history(query, final_answer)
-                return final_answer
+                return last_result
 
-            working_query = self._reflect_and_replan(
+            state.working_query = self._reflect_and_replan(
                 original_query=query,
-                working_query=working_query,
+                working_query=state.working_query,
                 plan=plan,
-                results=results,
+                results=step_runs,
                 final_answer=final_answer,
                 verification=verification,
+                completed_steps=state.completed_steps,
             )
 
-        self._save_to_history(query, last_answer)
-        return last_answer
+        self._save_to_history(query, last_result.final_answer)
+        return last_result
 
     def _plan(self, query: str) -> list[dict[str, str]]:
         """生成线性执行计划。"""
@@ -343,30 +404,54 @@ class ReActAgent:
 
     def _execute_plan_steps(
         self,
-        working_query: str,
+        state: PlanExecutionState,
         plan: list[dict[str, str]],
-    ) -> list[dict[str, str]]:
-        """顺序执行所有计划步骤。"""
-        results: list[dict[str, str]] = []
+    ) -> list[StepRun]:
+        """顺序执行所有计划步骤，并在可能时复用已完成结果。"""
+        results: list[StepRun] = []
         for index, step in enumerate(plan, 1):
+            reusable = state.find_completed_step(step["title"], step["task"])
+            if reusable is not None:
+                reused_step = StepRun(
+                    step_id=f"attempt-{state.attempt}-step-{index}",
+                    title=step["title"],
+                    task=step["task"],
+                    final_answer=reusable.final_answer,
+                    status="reused",
+                    tool_traces=list(reusable.tool_traces),
+                    notes=list(reusable.notes),
+                    reused_from_attempt=reusable.reused_from_attempt,
+                )
+                results.append(reused_step)
+                self._log(f"\n--- 执行步骤 {index}/{len(plan)}: {step['title']} ---")
+                self._log("  ♻️  复用上一轮已完成步骤结果")
+                self._log(f"  Step Result: {reused_step.final_answer}")
+                continue
+
             self._log(f"\n--- 执行步骤 {index}/{len(plan)}: {step['title']} ---")
-            step_query = self._build_step_query(working_query, plan, results, index, step)
+            completed_steps = [*state.completed_steps, *results]
+            step_query = self._build_step_query(state.working_query, plan, completed_steps, index, step)
             step_result = self._run_sub_agent(step_query, self.executor_mode)
-            results.append(
-                {
-                    "title": step["title"],
-                    "task": step["task"],
-                    "result": step_result,
-                }
+            step_run = StepRun(
+                step_id=f"attempt-{state.attempt}-step-{index}",
+                title=step["title"],
+                task=step["task"],
+                final_answer=step_result.final_answer,
+                status="failed" if step_result.final_answer.startswith("错误：") else "done",
+                tool_traces=step_result.tool_traces,
+                notes=step_result.notes,
+                reused_from_attempt=state.attempt,
             )
-            self._log(f"  Step Result: {step_result}")
+            results.append(step_run)
+            self._remember_step_runs(state, [step_run])
+            self._log(f"  Step Result: {step_run.final_answer}")
         return results
 
     def _build_step_query(
         self,
         query: str,
         plan: list[dict[str, str]],
-        results: list[dict[str, str]],
+        results: list[StepRun],
         step_index: int,
         step: dict[str, str],
     ) -> str:
@@ -382,10 +467,12 @@ class ReActAgent:
             f"步骤标题: {step['title']}\n"
             f"当前子任务: {step['task']}\n\n"
             f"已完成步骤结果:\n{completed_text}\n\n"
-            "请只完成当前步骤，不要提前总结整个任务。如果需要，可调用工具。"
+            "请只完成当前步骤，不要提前总结整个任务。"
+            "如果当前子任务涉及检索、核实、比较或引用来源，优先使用工具；"
+            "如果证据不足，请明确说明不足之处。"
         )
 
-    def _run_sub_agent(self, query: str, mode: str) -> str:
+    def _run_sub_agent(self, query: str, mode: str) -> AgentRunResult:
         """使用指定模式执行单个子任务。"""
         sub_agent = ReActAgent(
             llm=self.llm,
@@ -396,7 +483,7 @@ class ReActAgent:
             system_prompt=self._build_executor_system_prompt(mode),
             enable_verifier=False,
         )
-        return sub_agent.run(query)
+        return sub_agent.run_with_trace(query)
 
     def _build_planner_prompt(self) -> str:
         """构建 Planner 的系统提示词。"""
@@ -414,6 +501,8 @@ class ReActAgent:
         execution_guidance = (
             "你当前处于 Plan-and-Execute 的执行阶段。"
             "请专注完成当前子任务，必要时使用工具，但不要抢先总结整个原始任务。"
+            "对于检索、核实、比较、引用来源这类子任务，优先使用工具而不是直接凭记忆作答；"
+            "如果工具返回的信息不足以支持结论，请明确说明证据不足。"
         )
 
         if mode == "function_calling":
@@ -428,7 +517,7 @@ class ReActAgent:
         original_query: str,
         working_query: str,
         plan: list[dict[str, str]],
-        results: list[dict[str, str]],
+        results: list[StepRun],
     ) -> str:
         """汇总所有步骤结果，生成最终回答。"""
         summary_prompt = SYSTEM_PROMPT_PLAN_AND_EXECUTE_SUMMARIZER
@@ -442,7 +531,7 @@ class ReActAgent:
             f"步骤结果:\n{self._format_results(results)}"
         )
         summary = self.llm.chat_simple(prompt=summary_input, system=summary_prompt).strip()
-        return summary or (results[-1]["result"] if results else DEFAULT_FALLBACK_MESSAGE)
+        return summary or (results[-1].final_answer if results else DEFAULT_FALLBACK_MESSAGE)
 
     def _verify_plan_execution(
         self,
@@ -450,18 +539,19 @@ class ReActAgent:
         original_query: str,
         working_query: str,
         plan: list[dict[str, str]],
-        results: list[dict[str, str]],
+        results: list[StepRun],
         final_answer: str,
-    ) -> dict[str, Any]:
+    ) -> VerificationResult:
         """对候选回答做最终验收。"""
         if not self.enable_verifier:
-            return {
-                "passed": True,
-                "reason": "Verifier 已关闭。",
-                "missing": [],
-                "suggested_fix": "",
-                "parser_failed": False,
-            }
+            return VerificationResult(
+                passed=True,
+                reason="Verifier 已关闭。",
+                missing=[],
+                suggested_fix="",
+                failure_type="VERIFIER_DISABLED",
+                parser_failed=False,
+            )
 
         verifier_prompt = SYSTEM_PROMPT_PLAN_AND_EXECUTE_VERIFIER
         if self.system_prompt:
@@ -479,47 +569,51 @@ class ReActAgent:
         self._log(self._indent(response))
 
         verification = self._parse_verification_result(response)
-        if verification["passed"]:
-            self._log(f"✅ 验证通过: {verification['reason']}")
+        if verification.passed:
+            self._log(f"✅ 验证通过: {verification.reason}")
         else:
-            self._log(f"❌ 验证未通过: {verification['reason']}")
-            if verification["missing"]:
-                self._log(f"  缺失点: {', '.join(verification['missing'])}")
-            if verification["suggested_fix"]:
-                self._log(f"  修正方向: {verification['suggested_fix']}")
+            self._log(f"❌ 验证未通过: {verification.reason}")
+            self._log(f"  失败类型: {verification.failure_type}")
+            if verification.missing:
+                self._log(f"  缺失点: {', '.join(verification.missing)}")
+            if verification.suggested_fix:
+                self._log(f"  修正方向: {verification.suggested_fix}")
         return verification
 
-    def _parse_verification_result(self, text: str) -> dict[str, Any]:
+    def _parse_verification_result(self, text: str) -> VerificationResult:
         """解析 Verifier 的 JSON 输出。"""
         json_block = self._extract_json_block(text)
         if not json_block:
-            return {
-                "passed": True,
-                "reason": "Verifier 输出不可解析，默认接受当前结果。",
-                "missing": [],
-                "suggested_fix": "",
-                "parser_failed": True,
-            }
+            return VerificationResult(
+                passed=True,
+                reason="Verifier 输出不可解析，默认接受当前结果。",
+                missing=[],
+                suggested_fix="",
+                failure_type="PARSER_FAILED",
+                parser_failed=True,
+            )
 
         try:
             payload = json.loads(json_block)
         except json.JSONDecodeError:
-            return {
-                "passed": True,
-                "reason": "Verifier JSON 非法，默认接受当前结果。",
-                "missing": [],
-                "suggested_fix": "",
-                "parser_failed": True,
-            }
+            return VerificationResult(
+                passed=True,
+                reason="Verifier JSON 非法，默认接受当前结果。",
+                missing=[],
+                suggested_fix="",
+                failure_type="PARSER_FAILED",
+                parser_failed=True,
+            )
 
         if not isinstance(payload, dict):
-            return {
-                "passed": True,
-                "reason": "Verifier 输出格式不正确，默认接受当前结果。",
-                "missing": [],
-                "suggested_fix": "",
-                "parser_failed": True,
-            }
+            return VerificationResult(
+                passed=True,
+                reason="Verifier 输出格式不正确，默认接受当前结果。",
+                missing=[],
+                suggested_fix="",
+                failure_type="PARSER_FAILED",
+                parser_failed=True,
+            )
 
         raw_passed = payload.get("passed")
         if isinstance(raw_passed, bool):
@@ -537,14 +631,20 @@ class ReActAgent:
             or payload.get("action")
             or ""
         ).strip()
+        failure_type = str(
+            payload.get("failure_type")
+            or payload.get("type")
+            or ("PASSED" if passed else "UNKNOWN")
+        ).strip().upper().replace("-", "_").replace(" ", "_")
 
-        return {
-            "passed": passed,
-            "reason": reason,
-            "missing": missing,
-            "suggested_fix": suggested_fix,
-            "parser_failed": False,
-        }
+        return VerificationResult(
+            passed=passed,
+            reason=reason,
+            missing=missing,
+            suggested_fix=suggested_fix,
+            failure_type=failure_type or ("PASSED" if passed else "UNKNOWN"),
+            parser_failed=False,
+        )
 
     def _reflect_and_replan(
         self,
@@ -552,26 +652,30 @@ class ReActAgent:
         original_query: str,
         working_query: str,
         plan: list[dict[str, str]],
-        results: list[dict[str, str]],
+        results: list[StepRun],
         final_answer: str,
-        verification: dict[str, Any],
+        verification: VerificationResult,
+        completed_steps: list[StepRun],
     ) -> str:
         """根据验收失败结果生成下一轮工作任务。"""
         reflection_prompt = SYSTEM_PROMPT_PLAN_AND_EXECUTE_REFLECTOR
         if self.system_prompt:
             reflection_prompt += f"\n\n补充上下文：\n{self.system_prompt}"
 
+        reusable_text = self._format_results(completed_steps, empty_text="(暂无可复用的已完成步骤)")
         reflection_input = (
             f"原始任务:\n{original_query}\n\n"
             f"当前工作任务:\n{working_query}\n\n"
             f"上一轮执行计划:\n{self._format_plan(plan, empty_text='(未生成有效计划)')}\n\n"
             f"上一轮步骤结果:\n{self._format_results(results, empty_text='(没有步骤结果，可能直接执行了任务)')}\n\n"
+            f"可复用的已完成步骤:\n{reusable_text}\n\n"
             f"上一轮候选回答:\n{final_answer}\n\n"
             "Verifier 结论:\n"
-            f"- 是否通过: {verification['passed']}\n"
-            f"- 原因: {verification['reason']}\n"
-            f"- 缺失点: {json.dumps(verification['missing'], ensure_ascii=False)}\n"
-            f"- 修正方向: {verification['suggested_fix']}"
+            f"- 是否通过: {verification.passed}\n"
+            f"- 失败类型: {verification.failure_type}\n"
+            f"- 原因: {verification.reason}\n"
+            f"- 缺失点: {json.dumps(verification.missing, ensure_ascii=False)}\n"
+            f"- 修正方向: {verification.suggested_fix}"
         )
         response = self.llm.chat_simple(prompt=reflection_input, system=reflection_prompt)
         self._log("\n🪞 Reflection 输出:")
@@ -584,6 +688,7 @@ class ReActAgent:
                 original_query=original_query,
                 working_query=working_query,
                 verification=verification,
+                completed_steps=completed_steps,
             )
 
         issues = reflection.get("issues", [])
@@ -618,24 +723,58 @@ class ReActAgent:
         *,
         original_query: str,
         working_query: str,
-        verification: dict[str, Any],
+        verification: VerificationResult,
+        completed_steps: list[StepRun],
     ) -> str:
         """当 Reflection 输出无效时，构造兜底的重规划任务。"""
-        missing_text = "；".join(verification["missing"]) or "请补齐缺失信息并确保最终结论完整。"
-        suggested_fix = verification["suggested_fix"] or "重新规划并补救缺失点。"
+        missing_text = "；".join(verification.missing) or "请补齐缺失信息并确保最终结论完整。"
+        suggested_fix = verification.suggested_fix or "重新规划并补救缺失点。"
+        reusable_text = self._format_results(completed_steps, empty_text="(暂无可复用的已完成步骤)")
         return (
             f"{original_query}\n\n"
             "[上轮执行复盘]\n"
             f"上轮工作任务：{working_query}\n"
-            f"验收未通过原因：{verification['reason']}\n"
+            f"验收未通过原因：{verification.reason}\n"
+            f"失败类型：{verification.failure_type}\n"
             f"缺失点：{missing_text}\n"
             f"修正建议：{suggested_fix}\n\n"
-            "请基于以上复盘重新规划任务，并优先补齐缺失部分。"
+            f"可直接复用的已完成步骤：\n{reusable_text}\n\n"
+            "请基于以上复盘重新规划任务，优先补齐缺失部分，不要重复规划已经完成且可复用的步骤。"
         )
 
     # ================================================================
     # 辅助方法
     # ================================================================
+
+    def _remember_step_runs(self, state: PlanExecutionState, step_runs: list[StepRun]) -> None:
+        """把当前轮中可复用的步骤写回状态。"""
+        for step in step_runs:
+            if step.status in {"done", "reused"}:
+                state.upsert_completed_step(step)
+
+    def _build_plan_execution_result(
+        self,
+        final_answer: str,
+        state: PlanExecutionState,
+    ) -> AgentRunResult:
+        """将 Plan-and-Execute 的状态压缩为统一返回值。"""
+        return AgentRunResult(
+            final_answer=final_answer,
+            tool_traces=self._collect_tool_traces(state.completed_steps),
+            step_runs=list(state.completed_steps),
+            notes=[
+                f"attempt={state.attempt}",
+                f"verification={state.verification.failure_type if state.verification else 'UNKNOWN'}",
+            ],
+        )
+
+    @staticmethod
+    def _collect_tool_traces(step_runs: list[StepRun]) -> list[ToolTrace]:
+        """聚合所有步骤中的工具调用轨迹。"""
+        traces: list[ToolTrace] = []
+        for step in step_runs:
+            traces.extend(step.tool_traces)
+        return traces
 
     def reset(self) -> None:
         """重置对话历史。"""
@@ -729,18 +868,36 @@ class ReActAgent:
             for index, item in enumerate(plan, 1)
         )
 
-    def _format_results(self, results: list[dict[str, str]], empty_text: str = "(暂无步骤结果)") -> str:
+    def _format_results(self, results: list[Any], empty_text: str = "(暂无步骤结果)") -> str:
         """格式化步骤结果文本。"""
         if not results:
             return empty_text
-        return "\n\n".join(
-            (
+
+        formatted: list[str] = []
+        for index, item in enumerate(results, 1):
+            if isinstance(item, StepRun):
+                trace_text = "\n".join(
+                    f"    - {trace.tool_name}({trace.tool_input}) => {trace.observation}"
+                    for trace in item.tool_traces
+                ) or "    (无工具调用)"
+                reuse_text = f"\n复用来源: attempt {item.reused_from_attempt}" if item.status == "reused" and item.reused_from_attempt else ""
+                notes_text = f"\n备注: {'；'.join(item.notes)}" if item.notes else ""
+                formatted.append(
+                    f"步骤 {index}: {item.title}\n"
+                    f"状态: {item.status}{reuse_text}\n"
+                    f"子任务: {item.task}\n"
+                    f"执行结果: {item.final_answer}\n"
+                    f"工具轨迹:\n{trace_text}{notes_text}"
+                )
+                continue
+
+            formatted.append(
                 f"步骤 {index}: {item['title']}\n"
                 f"子任务: {item['task']}\n"
                 f"执行结果: {item['result']}"
             )
-            for index, item in enumerate(results, 1)
-        )
+
+        return "\n\n".join(formatted)
 
     def _log_plan(self, plan: list[dict[str, str]]) -> None:
         """打印计划摘要。"""
