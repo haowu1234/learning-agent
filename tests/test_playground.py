@@ -92,6 +92,15 @@ class TestPlaygroundHelpers(unittest.TestCase):
         self.assertEqual(len(new_agent.history), 2)
         self.assertEqual(new_agent.max_plan_steps, 6)
 
+    def test_args_to_config_maps_replan_flags(self):
+        parser = self.playground.build_parser()
+        args = parser.parse_args(["--max-replans", "3", "--disable-verifier"])
+
+        config = self.playground.args_to_config(args)
+
+        self.assertEqual(config.max_replans, 3)
+        self.assertFalse(config.enable_verifier)
+
     def test_apply_runtime_updates_rejects_invalid_key(self):
         config = self.playground.PlaygroundConfig()
         agent = self.playground.build_agent(config)

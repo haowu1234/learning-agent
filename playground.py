@@ -41,6 +41,8 @@ HELP_TEXT = """可用命令：
 - executor_mode=function_calling|text_parsing
 - max_steps=<int>
 - max_plan_steps=<int>
+- max_replans=<int>
+- enable_verifier=true|false
 - keep_history=true|false
 - quiet=true|false
 """
@@ -52,6 +54,8 @@ class PlaygroundConfig:
     executor_mode: str = "function_calling"
     max_steps: int = 10
     max_plan_steps: int = 4
+    max_replans: int = 1
+    enable_verifier: bool = True
     keep_history: bool = False
     quiet: bool = False
     system_prompt: str | None = None
@@ -75,6 +79,8 @@ def build_agent(config: PlaygroundConfig) -> ReActAgent:
         executor_mode=config.executor_mode,
         max_steps=config.max_steps,
         max_plan_steps=config.max_plan_steps,
+        max_replans=config.max_replans,
+        enable_verifier=config.enable_verifier,
         verbose=not config.quiet,
         system_prompt=config.system_prompt,
     )
@@ -105,6 +111,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=4,
         help="plan_and_execute 模式下最多规划多少步",
+    )
+    parser.add_argument(
+        "--max-replans",
+        type=int,
+        default=1,
+        help="Verifier 未通过时最多允许重新规划多少次",
+    )
+    parser.add_argument(
+        "--disable-verifier",
+        action="store_true",
+        help="关闭 Plan-and-Execute 的结果验收与自动重规划",
     )
     parser.add_argument(
         "--task",
@@ -162,6 +179,7 @@ def config_summary(config: PlaygroundConfig, agent: ReActAgent | None = None) ->
     return (
         f"mode={config.mode}, executor_mode={config.executor_mode}, "
         f"max_steps={config.max_steps}, max_plan_steps={config.max_plan_steps}, "
+        f"max_replans={config.max_replans}, enable_verifier={config.enable_verifier}, "
         f"keep_history={config.keep_history}, quiet={config.quiet}, "
         f"system_prompt={'on' if has_system_prompt else 'off'}, "
         f"base_url={base_url}, model={model}"
@@ -240,6 +258,10 @@ def apply_runtime_updates(
             new_config.max_steps = int(raw_value)
         elif key == "max_plan_steps":
             new_config.max_plan_steps = int(raw_value)
+        elif key == "max_replans":
+            new_config.max_replans = int(raw_value)
+        elif key == "enable_verifier":
+            new_config.enable_verifier = parse_bool(raw_value)
         elif key == "keep_history":
             new_config.keep_history = parse_bool(raw_value)
         elif key == "quiet":
