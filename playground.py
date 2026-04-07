@@ -141,6 +141,8 @@ def args_to_config(args: argparse.Namespace) -> PlaygroundConfig:
         executor_mode=args.executor_mode,
         max_steps=args.max_steps,
         max_plan_steps=args.max_plan_steps,
+        max_replans=args.max_replans,
+        enable_verifier=not args.disable_verifier,
         keep_history=args.keep_history,
         quiet=args.quiet,
         system_prompt=system_prompt,

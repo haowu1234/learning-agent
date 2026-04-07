@@ -90,6 +90,7 @@ class TestPlaygroundHelpers(unittest.TestCase):
 
         self.assertTrue(new_config.keep_history)
         self.assertEqual(len(new_agent.history), 2)
+        self.assertEqual(new_agent.max_plan_steps, 6)
 
     def test_apply_runtime_updates_rejects_invalid_key(self):
         config = self.playground.PlaygroundConfig()

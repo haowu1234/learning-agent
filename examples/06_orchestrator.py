@@ -39,6 +39,7 @@ def main():
     orchestrator = OrchestratorMultiAgent(
         llm=llm,
         tool_registry=registry,
+        max_replan=1,
         verbose=True,
     )
 

@@ -4,6 +4,7 @@
 - 体验 Agent 先规划、再执行、最后汇总的工作流
 - 理解“任务策略模式”和“工具调用协议模式”的区别
 - 观察 plan_and_execute 如何复用 function_calling / text_parsing 作为执行器
+- 体验 Verifier / Reflection / Replan 如何形成闭环
 
 运行方式：
     python -m examples.08_plan_and_execute
@@ -54,7 +55,8 @@ def main():
     print("\n\n📝 知识点总结：")
     print("1. plan_and_execute 会先生成步骤计划，再逐步执行")
     print("2. executor_mode 决定每个子任务内部使用哪种工具调用协议")
-    print("3. 这个模式更适合长任务、复合任务和需要显式拆解的问题")
+    print("3. Verifier 会在汇总后做任务验收，不通过时会触发下一轮")
+    print("4. Reflection 会把失败原因转成新的工作任务，驱动重新规划")
 
 
 if __name__ == "__main__":

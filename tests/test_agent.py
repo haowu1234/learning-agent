@@ -176,11 +176,12 @@ class TestReActAgentModes(unittest.TestCase):
 
         self.assertIn("plan_and_execute", str(context.exception))
 
-    def test_plan_and_execute_runs_planner_executor_and_summarizer(self):
+    def test_plan_and_execute_runs_planner_executor_summarizer_and_verifier(self):
         fake_llm = FakeLLM(
             simple_responses=[
                 '{"steps": [{"title": "收集信息", "task": "先确认已知条件"}, {"title": "完成计算", "task": "基于上一步结果给出计算结论"}]}',
                 "综合结论：先确认了条件，再完成了计算。",
+                '{"passed": true, "reason": "回答已经覆盖任务要求", "missing": [], "suggested_fix": ""}',
             ],
             chat_responses=[
                 "Thought: 先整理信息\nFinal Answer: 已确认已知条件。",
@@ -199,15 +200,56 @@ class TestReActAgentModes(unittest.TestCase):
         result = agent.run("如果温度乘以 3 再加上 100，结果是多少？")
 
         self.assertEqual(result, "综合结论：先确认了条件，再完成了计算。")
-        self.assertEqual(len(fake_llm.simple_calls), 2)
+        self.assertEqual(len(fake_llm.simple_calls), 3)
         self.assertEqual(len(fake_llm.chat_calls), 2)
         self.assertIn("任务规划器", fake_llm.simple_calls[0][1])
+        self.assertIn("结果汇总器", fake_llm.simple_calls[1][1])
+        self.assertIn("任务验收器", fake_llm.simple_calls[2][1])
         self.assertIn("当前步骤: 第 1 步 / 2", fake_llm.chat_calls[0]["messages"][-1]["content"])
+        self.assertEqual(agent.history.get_messages()[-1]["content"], result)
+
+    def test_plan_and_execute_reflects_and_replans_after_failed_verification(self):
+        fake_llm = FakeLLM(
+            simple_responses=[
+                '{"steps": [{"title": "先给结论", "task": "先尝试给出一个简短结论"}]}',
+                "初版结论：目前信息不足。",
+                '{"passed": false, "reason": "缺少最终计算结果", "missing": ["最终数值"], "suggested_fix": "重新执行并补充最终计算"}',
+                '{"issues": ["没有产出最终数值"], "revised_task": "请重新完成原始任务，重点补充最终计算结果，并确保给出明确数值结论。", "notes": "不要只给模糊结论"}',
+                '{"steps": [{"title": "完成计算", "task": "根据已知条件给出最终数值结果"}]}',
+                "修正后结论：最终结果是 142。",
+                '{"passed": true, "reason": "已经补齐数值并完成任务", "missing": [], "suggested_fix": ""}',
+            ],
+            chat_responses=[
+                "Thought: 先试着总结\nFinal Answer: 目前信息不足。",
+                "Thought: 重新计算\nFinal Answer: 最终数值结果是 142。",
+            ],
+        )
+        agent = ReActAgent(
+            llm=fake_llm,
+            tool_registry=self.registry,
+            mode="plan_and_execute",
+            executor_mode="text_parsing",
+            max_plan_steps=3,
+            max_replans=1,
+            verbose=False,
+        )
+
+        result = agent.run("请给出最终计算结果。")
+
+        self.assertEqual(result, "修正后结论：最终结果是 142。")
+        self.assertEqual(len(fake_llm.simple_calls), 7)
+        self.assertEqual(len(fake_llm.chat_calls), 2)
+        self.assertIn("任务验收器", fake_llm.simple_calls[2][1])
+        self.assertIn("任务复盘与重规划助手", fake_llm.simple_calls[3][1])
+        self.assertIn("重点补充最终计算结果", fake_llm.simple_calls[4][0])
         self.assertEqual(agent.history.get_messages()[-1]["content"], result)
 
     def test_plan_and_execute_falls_back_to_direct_execution_when_plan_invalid(self):
         fake_llm = FakeLLM(
-            simple_responses=["我觉得先想一想，但这里没有给出 JSON 计划。"],
+            simple_responses=[
+                "我觉得先想一想，但这里没有给出 JSON 计划。",
+                '{"passed": true, "reason": "直接执行结果已经满足任务", "missing": [], "suggested_fix": ""}',
+            ],
             chat_responses=["Thought: 直接执行\nFinal Answer: 直接执行结果。"],
         )
         agent = ReActAgent(
@@ -221,7 +263,7 @@ class TestReActAgentModes(unittest.TestCase):
         result = agent.run("直接帮我完成这个简单问题")
 
         self.assertEqual(result, "直接执行结果。")
-        self.assertEqual(len(fake_llm.simple_calls), 1)
+        self.assertEqual(len(fake_llm.simple_calls), 2)
         self.assertEqual(len(fake_llm.chat_calls), 1)
 
 

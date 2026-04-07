@@ -1,7 +1,7 @@
 """Orchestrator 编排者模式
 
 一个 Planner Agent 负责拆解任务、动态分派给专业 Agent 执行，
-并根据执行结果决定下一步行动，支持重新规划。
+并根据执行结果决定下一步行动，支持失败后的重新规划。
 
 示例流程:
     task → [Planner 规划] → step1 → [Agent A] → step2 → [Agent B] → ... → [汇总] → final
@@ -15,7 +15,6 @@ from typing import Any
 
 from src.llm import LLMClient
 from src.multi.base import BaseMultiAgent
-from src.multi.message import Message, MessageType
 from src.tools.base import ToolRegistry
 
 PLANNER_PROMPT = """你是一个任务规划和编排专家。你需要将复杂任务拆解为子任务，并分配给合适的 Agent 执行。
@@ -69,56 +68,105 @@ class OrchestratorMultiAgent(BaseMultiAgent):
 
     def run(self, task: str) -> str:
         """执行编排模式。"""
-        self.state.reset()
-        self.state.task = task
-        self.state.status = "planning"
+        original_task = task
+        working_task = task
+        total_attempts = self._max_replan + 1
+        last_error = "错误：无法生成执行计划。"
 
-        self._log_header(f"Orchestrator 编排模式开始")
-        self._log(f"  任务: {task}")
-        self._log(f"  可用 Agent: {self.agent_names}")
+        for attempt in range(1, total_attempts + 1):
+            self.state.reset()
+            self.state.task = original_task
+            self.state.status = "planning"
+            self.state.metadata["attempt"] = attempt
 
-        # Step 1: 规划
-        plan = self._plan(task)
-        if not plan:
-            return "错误：无法生成执行计划。"
+            self._log_header(f"Orchestrator 编排模式开始（尝试 {attempt}/{total_attempts}）")
+            self._log(f"  原始任务: {original_task}")
+            if attempt > 1:
+                self._log(f"  当前工作任务: {working_task}")
+            self._log(f"  可用 Agent: {self.agent_names}")
 
-        self.state.plan = [f"{p['agent']}: {p['task']}" for p in plan]
-        self._log(f"\n📋 执行计划 ({len(plan)} 步):")
-        for i, step in enumerate(plan, 1):
-            self._log(f"  {i}. [{step['agent']}] {step['task']}")
+            # Step 1: 规划
+            plan = self._plan(working_task)
+            if not plan:
+                last_error = "错误：无法生成执行计划。"
+                self._log(f"  ⚠️  {last_error}")
+                if attempt < total_attempts:
+                    working_task = self._build_replan_task(
+                        original_task=original_task,
+                        working_task=working_task,
+                        plan=[],
+                        errors=[last_error],
+                    )
+                    self._log("  🔁 进入下一轮重新规划。")
+                    continue
 
-        # Step 2: 按计划执行
-        self.state.status = "executing"
-        for i, step in enumerate(plan):
-            self.state.current_step = i + 1
-            agent_name = step["agent"]
-            sub_task = step["task"]
+                self.state.status = "failed"
+                return last_error
 
-            # 如果不是第一步，附上之前的结果作为上下文
-            if self.state.results:
-                sub_task += f"\n\n[参考信息] 前面步骤的结果:\n{self.state.get_all_results()}"
+            self.state.plan = [f"{p['agent']}: {p['task']}" for p in plan]
+            self._log(f"\n📋 执行计划 ({len(plan)} 步):")
+            for i, step in enumerate(plan, 1):
+                self._log(f"  {i}. [{step['agent']}] {step['task']}")
 
-            self._log(f"\n--- 执行步骤 {i+1}: [{agent_name}] ---")
-            self._log_agent(agent_name, "接收任务", step["task"])
+            # Step 2: 按计划执行
+            self.state.status = "executing"
+            execution_errors: list[str] = []
 
-            if agent_name not in self._agents:
-                self._log(f"  ⚠️  Agent '{agent_name}' 不存在，跳过")
-                continue
+            for i, step in enumerate(plan):
+                self.state.current_step = i + 1
+                agent_name = step["agent"]
+                sub_task = step["task"]
 
-            result = self._dispatch(agent_name, sub_task)
-            self._log_agent(agent_name, "输出结果", result)
-            self._fire_hook("on_step_complete", step=i + 1, state=self.state)
+                if self.state.results:
+                    sub_task += f"\n\n[参考信息] 前面步骤的结果:\n{self.state.get_all_results()}"
 
-        # Step 3: 汇总
-        self.state.status = "reviewing"
-        self._log(f"\n--- 汇总阶段 ---")
-        final = self._summarize(task)
+                self._log(f"\n--- 执行步骤 {i + 1}: [{agent_name}] ---")
+                self._log_agent(agent_name, "接收任务", step["task"])
 
-        self.state.status = "done"
-        self._log_header("Orchestrator 完成")
-        self._log(f"  {self.state.summary()}")
+                if agent_name not in self._agents:
+                    error = f"错误：Agent '{agent_name}' 不存在。"
+                    self._log(f"  ⚠️  {error}")
+                    execution_errors.append(error)
+                    break
 
-        return final
+                result = self._dispatch(agent_name, sub_task)
+                self._log_agent(agent_name, "输出结果", result)
+                self._fire_hook("on_step_complete", step=i + 1, state=self.state)
+
+                if result.startswith("错误："):
+                    execution_errors.append(
+                        f"步骤 {i + 1} 的 Agent '{agent_name}' 执行失败：{result}"
+                    )
+                    break
+
+            if execution_errors:
+                last_error = execution_errors[-1]
+                self._log(f"\n⚠️  本轮执行失败：{last_error}")
+                if attempt < total_attempts:
+                    working_task = self._build_replan_task(
+                        original_task=original_task,
+                        working_task=working_task,
+                        plan=plan,
+                        errors=execution_errors,
+                    )
+                    self._log("🔁 根据失败信息重新规划下一轮。")
+                    continue
+
+                self.state.status = "failed"
+                return last_error
+
+            # Step 3: 汇总
+            self.state.status = "reviewing"
+            self._log(f"\n--- 汇总阶段 ---")
+            final = self._summarize(original_task)
+
+            self.state.status = "done"
+            self._log_header("Orchestrator 完成")
+            self._log(f"  {self.state.summary()}")
+            return final
+
+        self.state.status = "failed"
+        return last_error
 
     def _plan(self, task: str) -> list[dict[str, str]]:
         """用 LLM 生成执行计划。"""
@@ -137,14 +185,12 @@ class OrchestratorMultiAgent(BaseMultiAgent):
 
     def _parse_plan(self, text: str) -> list[dict[str, str]]:
         """从 LLM 输出中解析执行计划 JSON。"""
-        # 尝试提取 JSON 块
         json_match = re.search(r"\[.*\]", text, re.DOTALL)
         if not json_match:
             return []
 
         try:
             plan = json.loads(json_match.group())
-            # 验证格式
             validated = []
             for item in plan:
                 if isinstance(item, dict) and "agent" in item and "task" in item:
@@ -160,3 +206,35 @@ class OrchestratorMultiAgent(BaseMultiAgent):
             all_results=self.state.get_all_results(),
         )
         return self.llm.chat_simple(prompt=prompt)
+
+    def _build_replan_task(
+        self,
+        *,
+        original_task: str,
+        working_task: str,
+        plan: list[dict[str, str]],
+        errors: list[str],
+    ) -> str:
+        """构造带失败上下文的下一轮规划任务。"""
+        plan_text = self._format_plan(plan)
+        error_text = "\n".join(f"- {error}" for error in errors)
+        previous_results = self.state.get_all_results()
+        return (
+            f"{original_task}\n\n"
+            "[上轮执行复盘]\n"
+            f"上轮工作任务：{working_task}\n\n"
+            f"上轮计划：\n{plan_text}\n\n"
+            f"上轮结果：\n{previous_results}\n\n"
+            f"上轮失败信息：\n{error_text}\n\n"
+            "请基于以上失败信息重新规划，避免重复失败，并尽量保留已经有效的信息。"
+        )
+
+    @staticmethod
+    def _format_plan(plan: list[dict[str, str]]) -> str:
+        """格式化计划文本。"""
+        if not plan:
+            return "(暂无有效计划)"
+        return "\n".join(
+            f"{index}. [{item['agent']}] {item['task']}"
+            for index, item in enumerate(plan, 1)
+        )
