@@ -56,8 +56,8 @@ learning-agent/
 
 | 文件 | 内容 |
 |------|------|
-| `agent/prompt.py` | ReAct 系统提示词模板，指导 LLM 按 `Thought → Action → Observation` 格式输出 |
-| `agent/react.py` | Agent 主循环：1) 将用户问题 + 历史发给 LLM → 2) 解析 LLM 输出，提取 Action → 3) 执行工具 → 4) 将 Observation 拼回上下文 → 5) 判断是否终止 |
+| `agent/prompt.py` | Agent 系统提示词模板，覆盖 Function Calling、纯文本解析，以及 Plan-and-Execute 的规划与汇总 |
+| `agent/react.py` | Agent 主循环：支持直接 ReAct（Function Calling / Text Parsing）与 Plan-and-Execute（先规划、再执行、最后汇总） |
 
 核心伪代码：
 

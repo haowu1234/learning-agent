@@ -1,21 +1,88 @@
-"""Agent 模块单元测试
+"""Agent 模块单元测试。
 
-注意：这些测试不依赖真实 LLM API，仅测试辅助组件。
+注意：这些测试不依赖真实 LLM API，仅测试辅助组件与 Agent 编排逻辑。
 集成测试需要配置 API Key 后运行 examples/ 中的示例。
 """
 
-import sys
 import os
+import sys
+import types
+import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import unittest
+if "dotenv" not in sys.modules:
+    dotenv_module = types.ModuleType("dotenv")
+    dotenv_module.load_dotenv = lambda *args, **kwargs: None
+    sys.modules["dotenv"] = dotenv_module
 
+if "openai" not in sys.modules:
+    openai_module = types.ModuleType("openai")
+
+    class _DummyOpenAI:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    openai_module.OpenAI = _DummyOpenAI
+    sys.modules["openai"] = openai_module
+    sys.modules["openai.types"] = types.ModuleType("openai.types")
+
+    chat_module = types.ModuleType("openai.types.chat")
+
+    class _DummyChatCompletion:
+        pass
+
+    chat_module.ChatCompletion = _DummyChatCompletion
+    sys.modules["openai.types.chat"] = chat_module
+
+from src.agent import ReActAgent, SUPPORTED_MODES
 from src.memory.history import ConversationHistory
 from src.tools.base import ToolRegistry
 from src.tools.calculator import CalculatorTool
-from src.tools.weather import WeatherTool
 from src.tools.search import SearchTool
+from src.tools.weather import WeatherTool
+
+
+class _FakeMessage:
+    def __init__(self, content: str = "", tool_calls=None):
+        self.content = content
+        self.tool_calls = tool_calls or []
+
+
+class _FakeChoice:
+    def __init__(self, message: _FakeMessage):
+        self.message = message
+
+
+class _FakeResponse:
+    def __init__(self, content: str = "", tool_calls=None):
+        self.choices = [_FakeChoice(_FakeMessage(content, tool_calls))]
+
+
+class FakeLLM:
+    """用于测试 Agent 的轻量级 LLM 替身。"""
+
+    def __init__(self, *, simple_responses=None, chat_responses=None):
+        self.simple_responses = list(simple_responses or [])
+        self.chat_responses = list(chat_responses or [])
+        self.simple_calls: list[tuple[str, str]] = []
+        self.chat_calls: list[dict] = []
+
+    def chat(self, messages, tools=None, temperature=0.7, max_tokens=2048):
+        self.chat_calls.append(
+            {
+                "messages": messages,
+                "tools": tools,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+            }
+        )
+        content = self.chat_responses.pop(0) if self.chat_responses else ""
+        return _FakeResponse(content=content)
+
+    def chat_simple(self, prompt: str, system: str = "") -> str:
+        self.simple_calls.append((prompt, system))
+        return self.simple_responses.pop(0) if self.simple_responses else ""
 
 
 class TestConversationHistory(unittest.TestCase):
@@ -37,14 +104,12 @@ class TestConversationHistory(unittest.TestCase):
         self.assertEqual(messages[1]["role"], "assistant")
 
     def test_truncation(self):
-        # max_turns=3，超过后应丢弃最早的对话
         for i in range(5):
             self.history.add_user_message(f"问题{i}")
             self.history.add_assistant_message(f"回答{i}")
 
         self.assertEqual(self.history.turn_count, 3)
         messages = self.history.get_messages()
-        # 应该保留最后 3 轮
         self.assertEqual(messages[0]["content"], "问题2")
 
     def test_clear(self):
@@ -57,7 +122,6 @@ class TestConversationHistory(unittest.TestCase):
         self.history.add_user_message("测试")
         messages = self.history.get_messages()
         messages.append({"role": "user", "content": "篡改"})
-        # 原始历史不应被修改
         self.assertEqual(len(self.history), 1)
 
 
@@ -70,14 +134,12 @@ class TestToolRegistryIntegration(unittest.TestCase):
         registry.register(WeatherTool())
         registry.register(SearchTool())
 
-        # 验证所有工具注册
         self.assertEqual(len(registry), 3)
         self.assertEqual(
             set(registry.tool_names),
             {"calculator", "weather", "search"},
         )
 
-        # 验证 OpenAI 格式输出
         tools = registry.to_openai_tools()
         self.assertEqual(len(tools), 3)
         for tool in tools:
@@ -86,11 +148,81 @@ class TestToolRegistryIntegration(unittest.TestCase):
             self.assertIn("description", tool["function"])
             self.assertIn("parameters", tool["function"])
 
-        # 验证工具描述生成
         desc = registry.get_tools_description()
         self.assertIn("calculator", desc)
         self.assertIn("weather", desc)
         self.assertIn("search", desc)
+
+
+class TestReActAgentModes(unittest.TestCase):
+    def setUp(self):
+        self.registry = ToolRegistry()
+        self.registry.register(CalculatorTool())
+
+    def test_available_modes_contains_plan_and_execute(self):
+        self.assertEqual(ReActAgent.available_modes(), SUPPORTED_MODES)
+        self.assertIn("plan_and_execute", SUPPORTED_MODES)
+
+    def test_invalid_mode_raises_error(self):
+        agent = ReActAgent(
+            llm=FakeLLM(),
+            tool_registry=self.registry,
+            mode="unsupported_mode",
+            verbose=False,
+        )
+
+        with self.assertRaises(ValueError) as context:
+            agent.run("测试")
+
+        self.assertIn("plan_and_execute", str(context.exception))
+
+    def test_plan_and_execute_runs_planner_executor_and_summarizer(self):
+        fake_llm = FakeLLM(
+            simple_responses=[
+                '{"steps": [{"title": "收集信息", "task": "先确认已知条件"}, {"title": "完成计算", "task": "基于上一步结果给出计算结论"}]}',
+                "综合结论：先确认了条件，再完成了计算。",
+            ],
+            chat_responses=[
+                "Thought: 先整理信息\nFinal Answer: 已确认已知条件。",
+                "Thought: 继续执行\nFinal Answer: 计算结果是 142。",
+            ],
+        )
+        agent = ReActAgent(
+            llm=fake_llm,
+            tool_registry=self.registry,
+            mode="plan_and_execute",
+            executor_mode="text_parsing",
+            max_plan_steps=4,
+            verbose=False,
+        )
+
+        result = agent.run("如果温度乘以 3 再加上 100，结果是多少？")
+
+        self.assertEqual(result, "综合结论：先确认了条件，再完成了计算。")
+        self.assertEqual(len(fake_llm.simple_calls), 2)
+        self.assertEqual(len(fake_llm.chat_calls), 2)
+        self.assertIn("任务规划器", fake_llm.simple_calls[0][1])
+        self.assertIn("当前步骤: 第 1 步 / 2", fake_llm.chat_calls[0]["messages"][-1]["content"])
+        self.assertEqual(agent.history.get_messages()[-1]["content"], result)
+
+    def test_plan_and_execute_falls_back_to_direct_execution_when_plan_invalid(self):
+        fake_llm = FakeLLM(
+            simple_responses=["我觉得先想一想，但这里没有给出 JSON 计划。"],
+            chat_responses=["Thought: 直接执行\nFinal Answer: 直接执行结果。"],
+        )
+        agent = ReActAgent(
+            llm=fake_llm,
+            tool_registry=self.registry,
+            mode="plan_and_execute",
+            executor_mode="text_parsing",
+            verbose=False,
+        )
+
+        result = agent.run("直接帮我完成这个简单问题")
+
+        self.assertEqual(result, "直接执行结果。")
+        self.assertEqual(len(fake_llm.simple_calls), 1)
+        self.assertEqual(len(fake_llm.chat_calls), 1)
 
 
 if __name__ == "__main__":
