@@ -1,0 +1,24 @@
+{
+  "servers": [
+    {
+      "name": "ddg-search",
+      "enabled": false,
+      "transport": "stdio",
+      "command": "uvx",
+      "args": [
+        "duckduckgo-mcp-server"
+      ],
+      "env": {},
+      "tools": [
+        {
+          "internal_name": "search",
+          "remote_name": "search",
+          "enabled": true,
+          "argument_map": {
+            "query": "query"
+          }
+        }
+      ]
+    }
+  ]
+}

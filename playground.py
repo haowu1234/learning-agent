@@ -18,6 +18,7 @@ from src.llm import LLMClient
 from src.skills.loader import load_skills
 from src.tools.base import ToolRegistry
 from src.tools.calculator import CalculatorTool
+from src.tools.mcp_registry import load_mcp_tools
 from src.tools.read_local_file import ReadLocalFileTool
 from src.tools.search import SearchTool
 from src.tools.weather import WeatherTool
@@ -69,8 +70,13 @@ def build_registry() -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(CalculatorTool())
     registry.register(WeatherTool())
-    registry.register(SearchTool.from_env())
     registry.register(ReadLocalFileTool())
+
+    for tool in load_mcp_tools():
+        registry.register(tool)
+
+    if "search" not in registry:
+        registry.register(SearchTool.from_env())
     return registry
 
 

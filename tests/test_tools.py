@@ -1,5 +1,6 @@
 """工具模块单元测试"""
 
+import json
 import sys
 import os
 
@@ -11,6 +12,7 @@ from pathlib import Path
 
 from src.tools.base import Tool, ToolRegistry
 from src.tools.calculator import CalculatorTool
+from src.tools.mcp_registry import load_mcp_tools
 from src.tools.read_local_file import ReadLocalFileTool
 from src.tools.weather import WeatherTool
 from src.tools.search import SearchTool
@@ -128,6 +130,64 @@ class TestSearchTool(unittest.TestCase):
         result = tool.run(query="python")
 
         self.assertIn("MCP_SEARCH_SERVER_COMMAND", result)
+
+
+class TestMCPRegistry(unittest.TestCase):
+    def setUp(self):
+        self.original_env = os.environ.copy()
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.original_env)
+
+    def test_load_mcp_tools_from_json_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "mcp_servers.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "servers": [
+                            {
+                                "name": "ddg-search",
+                                "enabled": True,
+                                "transport": "stdio",
+                                "command": "uvx",
+                                "args": ["duckduckgo-mcp-server"],
+                                "env": {},
+                                "tools": [
+                                    {
+                                        "internal_name": "search",
+                                        "remote_name": "search",
+                                        "argument_map": {"query": "query"},
+                                    },
+                                    {
+                                        "internal_name": "web_fetch",
+                                        "remote_name": "fetch_content",
+                                        "description": "抓取网页内容",
+                                        "parameters": {
+                                            "type": "object",
+                                            "properties": {
+                                                "url": {"type": "string"}
+                                            },
+                                            "required": ["url"],
+                                        },
+                                        "argument_map": {"url": "url"},
+                                    },
+                                ],
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            os.environ["MCP_SERVERS_CONFIG"] = str(config_path)
+
+            tools = load_mcp_tools()
+
+        self.assertEqual([tool.name for tool in tools], ["search", "web_fetch"])
+        self.assertEqual(tools[0].backend_label(), "mcp(uvx duckduckgo-mcp-server)#search")
+        self.assertEqual(tools[1].backend_label(), "mcp(uvx duckduckgo-mcp-server)#fetch_content")
 
 
 class TestReadLocalFileTool(unittest.TestCase):

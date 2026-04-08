@@ -128,6 +128,23 @@ class TestPlaygroundHelpers(unittest.TestCase):
         self.assertIsNotNone(search_tool)
         self.assertEqual(search_tool.backend_label(), "mock")
 
+    def test_build_registry_prefers_mcp_config_file(self):
+        config_dir = os.path.join(PROJECT_ROOT, "tests", "tmp")
+        os.makedirs(config_dir, exist_ok=True)
+        config_path = os.path.join(config_dir, "mcp_servers.test.json")
+        with open(config_path, "w", encoding="utf-8") as fp:
+            fp.write(
+                '{"servers":[{"name":"ddg-search","enabled":true,"transport":"stdio","command":"uvx","args":["duckduckgo-mcp-server"],"env":{},"tools":[{"internal_name":"search","remote_name":"search","argument_map":{"query":"query"}}]}]}'
+            )
+        self.addCleanup(lambda: os.path.exists(config_path) and os.remove(config_path))
+        os.environ["MCP_SERVERS_CONFIG"] = config_path
+
+        registry = self.playground.build_registry()
+        search_tool = registry.get("search")
+
+        self.assertIsNotNone(search_tool)
+        self.assertEqual(search_tool.backend_label(), "mcp(uvx duckduckgo-mcp-server)#search")
+
     def test_get_loaded_skills_returns_builtin_skill(self):
         agent = self.playground.build_agent(self.playground.PlaygroundConfig())
 
