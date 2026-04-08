@@ -69,7 +69,7 @@ def build_registry() -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(CalculatorTool())
     registry.register(WeatherTool())
-    registry.register(SearchTool())
+    registry.register(SearchTool.from_env())
     registry.register(ReadLocalFileTool())
     return registry
 
@@ -214,13 +214,20 @@ def config_summary(config: PlaygroundConfig, agent: ReActAgent | None = None) ->
     base_url = getattr(getattr(agent, "llm", None), "base_url", "(unknown)")
     model = getattr(getattr(agent, "llm", None), "model", "(unknown)")
     has_system_prompt = bool(config.system_prompt)
+
+    search_backend = "(unknown)"
+    if agent is not None:
+        search_tool = agent.tools.get("search")
+        if search_tool is not None and hasattr(search_tool, "backend_label"):
+            search_backend = search_tool.backend_label()
+
     return (
         f"mode={config.mode}, executor_mode={config.executor_mode}, "
         f"max_steps={config.max_steps}, max_plan_steps={config.max_plan_steps}, "
         f"max_replans={config.max_replans}, enable_verifier={config.enable_verifier}, "
         f"keep_history={config.keep_history}, quiet={config.quiet}, "
         f"system_prompt={'on' if has_system_prompt else 'off'}, "
-        f"base_url={base_url}, model={model}"
+        f"base_url={base_url}, model={model}, search_backend={search_backend}"
     )
 
 

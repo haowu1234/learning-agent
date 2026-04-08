@@ -42,12 +42,19 @@ def _install_fake_dependencies() -> None:
 
 class TestPlaygroundHelpers(unittest.TestCase):
     def setUp(self):
+        self.original_env = os.environ.copy()
+        os.environ["SEARCH_PROVIDER"] = "mock"
+        os.environ.pop("MCP_SEARCH_SERVER_COMMAND", None)
+        os.environ.pop("MCP_SEARCH_SERVER_ARGS", None)
+        os.environ.pop("MCP_SEARCH_TOOL_NAME", None)
         _install_fake_dependencies()
         sys.modules.pop("src.llm", None)
         sys.modules.pop("playground", None)
         self.playground = importlib.import_module("playground")
 
     def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.original_env)
         sys.modules.pop("playground", None)
         sys.modules.pop("src.llm", None)
 
@@ -114,6 +121,13 @@ class TestPlaygroundHelpers(unittest.TestCase):
         registry = self.playground.build_registry()
         self.assertIn("read_local_file", registry.tool_names)
 
+    def test_build_registry_uses_mock_search_backend_by_default(self):
+        registry = self.playground.build_registry()
+        search_tool = registry.get("search")
+
+        self.assertIsNotNone(search_tool)
+        self.assertEqual(search_tool.backend_label(), "mock")
+
     def test_get_loaded_skills_returns_builtin_skill(self):
         agent = self.playground.build_agent(self.playground.PlaygroundConfig())
 
@@ -138,6 +152,7 @@ class TestPlaygroundHelpers(unittest.TestCase):
 
         rendered = output.getvalue()
         self.assertIn("loaded_skills=1", rendered)
+        self.assertIn("search_backend=mock", rendered)
         self.assertIn(":skills", rendered)
 
     def test_print_skills_outputs_loaded_skill_details(self):

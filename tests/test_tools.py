@@ -16,6 +16,19 @@ from src.tools.weather import WeatherTool
 from src.tools.search import SearchTool
 
 
+class FakeMCPClient:
+    def __init__(self, response: str = "1. [示例结果](https://example.com)\n   示例摘要"):
+        self.response = response
+        self.calls: list[tuple[str | None, dict[str, str]]] = []
+
+    def call_tool(self, *, arguments: dict[str, str], tool_name: str | None = None) -> str:
+        self.calls.append((tool_name, arguments))
+        return self.response
+
+    def describe(self) -> str:
+        return "mcp(uvx duckduckgo-mcp-server)"
+
+
 class TestCalculatorTool(unittest.TestCase):
     def setUp(self):
         self.calc = CalculatorTool()
@@ -66,7 +79,12 @@ class TestWeatherTool(unittest.TestCase):
 
 class TestSearchTool(unittest.TestCase):
     def setUp(self):
+        self.original_env = os.environ.copy()
         self.search = SearchTool()
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self.original_env)
 
     def test_known_query(self):
         result = self.search.run(query="python 编程")
@@ -75,6 +93,41 @@ class TestSearchTool(unittest.TestCase):
     def test_unknown_query(self):
         result = self.search.run(query="随机搜索词")
         self.assertIn("搜索", result)
+
+    def test_from_env_uses_mcp_backend_when_configured(self):
+        os.environ["SEARCH_PROVIDER"] = "mcp"
+        os.environ["MCP_SEARCH_SERVER_COMMAND"] = "uvx"
+        os.environ["MCP_SEARCH_SERVER_ARGS"] = "duckduckgo-mcp-server"
+        fake_client = FakeMCPClient()
+
+        tool = SearchTool.from_env(mcp_client=fake_client)
+
+        self.assertEqual(tool.backend, "mcp")
+        self.assertEqual(tool.backend_label(), "mcp(uvx duckduckgo-mcp-server)")
+
+    def test_mcp_backend_calls_client(self):
+        fake_client = FakeMCPClient(response="1. [Python 官方文档](https://docs.python.org)\n   Python 是一种解释型语言。")
+        tool = SearchTool(
+            backend="mcp",
+            mcp_client=fake_client,
+            mcp_tool_name="duckduckgo_search",
+        )
+
+        result = tool.run(query="python")
+
+        self.assertIn("搜索 'python' 的结果", result)
+        self.assertIn("Python 官方文档", result)
+        self.assertEqual(
+            fake_client.calls,
+            [("duckduckgo_search", {"query": "python"})],
+        )
+
+    def test_mcp_backend_without_client_returns_helpful_error(self):
+        tool = SearchTool(backend="mcp")
+
+        result = tool.run(query="python")
+
+        self.assertIn("MCP_SEARCH_SERVER_COMMAND", result)
 
 
 class TestReadLocalFileTool(unittest.TestCase):

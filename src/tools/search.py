@@ -1,14 +1,16 @@
-"""网页搜索工具（Mock 版本）
+"""网页搜索工具。
 
-返回模拟的搜索结果，用于学习和测试 Agent 工具调用流程。
-生产环境中可替换为真实搜索 API（如 Bing Search、SerpAPI 等）。
+默认返回 Mock 结果，便于学习和测试 Agent 工具调用流程。
+当检测到 MCP 配置后，可自动切换到基于 Python MCP SDK 的真实搜索后端。
 """
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from src.tools.base import Tool
+from src.tools.mcp_client import MCPStdioClient
 
 # 模拟搜索结果
 _MOCK_RESULTS: dict[str, list[dict[str, str]]] = {
@@ -28,7 +30,52 @@ _MOCK_RESULTS: dict[str, list[dict[str, str]]] = {
 
 
 class SearchTool(Tool):
-    """网页搜索工具（Mock 数据）。"""
+    """网页搜索工具，支持 mock 与 MCP 两种后端。"""
+
+    def __init__(
+        self,
+        *,
+        backend: str = "mock",
+        mcp_client: MCPStdioClient | None = None,
+        mcp_tool_name: str | None = None,
+        query_argument: str = "query",
+    ) -> None:
+        normalized_backend = backend.strip().lower() if backend else "mock"
+        if normalized_backend not in {"mock", "mcp"}:
+            raise ValueError(f"不支持的 search backend: {backend}")
+        if not query_argument.strip():
+            raise ValueError("query_argument 不能为空。")
+
+        self.backend = normalized_backend
+        self.mcp_client = mcp_client
+        self.mcp_tool_name = mcp_tool_name.strip() if mcp_tool_name else None
+        self.query_argument = query_argument.strip()
+
+    @classmethod
+    def from_env(cls, *, mcp_client: MCPStdioClient | None = None) -> SearchTool:
+        """根据环境变量选择 mock 或 MCP 后端。"""
+        provider = os.getenv("SEARCH_PROVIDER", "").strip().lower()
+        resolved_mcp_client = mcp_client or MCPStdioClient.from_env()
+        mcp_tool_name = os.getenv("MCP_SEARCH_TOOL_NAME", "").strip() or None
+        query_argument = os.getenv("MCP_SEARCH_QUERY_ARGUMENT", "query").strip() or "query"
+
+        if provider == "mock":
+            return cls()
+        if provider == "mcp":
+            return cls(
+                backend="mcp",
+                mcp_client=resolved_mcp_client,
+                mcp_tool_name=mcp_tool_name,
+                query_argument=query_argument,
+            )
+        if resolved_mcp_client is not None:
+            return cls(
+                backend="mcp",
+                mcp_client=resolved_mcp_client,
+                mcp_tool_name=mcp_tool_name,
+                query_argument=query_argument,
+            )
+        return cls()
 
     @property
     def name(self) -> str:
@@ -51,18 +98,53 @@ class SearchTool(Tool):
             "required": ["query"],
         }
 
+    def backend_label(self) -> str:
+        if self.backend == "mock":
+            return "mock"
+        if self.mcp_client is None:
+            return "mcp(unconfigured)"
+        label = self.mcp_client.describe()
+        if self.mcp_tool_name:
+            return f"{label}#{self.mcp_tool_name}"
+        return label
+
     def run(self, query: str, **_: Any) -> str:
-        # 在 mock 数据中查找匹配结果
+        if self.backend == "mcp":
+            return self._run_mcp(query)
+        return self._run_mock(query)
+
+    def _run_mcp(self, query: str) -> str:
+        if self.mcp_client is None:
+            return (
+                "错误：search 已切换到 MCP 后端，但未检测到 MCP server 配置。"
+                "请设置 MCP_SEARCH_SERVER_COMMAND，必要时再补充 "
+                "MCP_SEARCH_SERVER_ARGS / MCP_SEARCH_TOOL_NAME。"
+            )
+
+        try:
+            result = self.mcp_client.call_tool(
+                tool_name=self.mcp_tool_name,
+                arguments={self.query_argument: query},
+            )
+        except Exception as exc:
+            return f"错误：MCP 搜索失败：{exc}"
+
+        result = result.strip()
+        if result.startswith(f"搜索 '{query}'"):
+            return result
+        return f"搜索 '{query}' 的结果：\n{result}"
+
+    @staticmethod
+    def _run_mock(query: str) -> str:
         query_lower = query.lower()
         for keyword, results in _MOCK_RESULTS.items():
             if keyword in query_lower:
                 lines = [f"搜索 '{query}' 的结果："]
-                for i, r in enumerate(results, 1):
-                    lines.append(f"  {i}. [{r['title']}]({r['url']})")
-                    lines.append(f"     {r['snippet']}")
+                for i, result in enumerate(results, 1):
+                    lines.append(f"  {i}. [{result['title']}]({result['url']})")
+                    lines.append(f"     {result['snippet']}")
                 return "\n".join(lines)
 
-        # 无匹配时返回通用结果
         return (
             f"搜索 '{query}' 的结果：\n"
             f"  1. [相关文章] - 找到了一些关于 '{query}' 的信息。\n"
