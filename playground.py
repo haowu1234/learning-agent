@@ -15,6 +15,7 @@ from pathlib import Path
 
 from src.agent.react import ReActAgent
 from src.llm import LLMClient
+from src.skills.loader import load_skills
 from src.tools.base import ToolRegistry
 from src.tools.calculator import CalculatorTool
 from src.tools.read_local_file import ReadLocalFileTool
@@ -32,6 +33,7 @@ HELP_TEXT = """可用命令：
 :help                 查看帮助
 :examples             查看内置示例任务
 :config               查看当前配置
+:skills               查看当前已加载的 skills
 :reset                清空历史
 :multiline            输入多行任务，最后用 :end 提交
 :set k=v [k=v...]     运行时修改配置，如 :set mode=plan_and_execute max_plan_steps=5
@@ -174,6 +176,40 @@ def print_examples() -> None:
         print(f"{index}. {task}")
 
 
+def get_loaded_skills(agent: ReActAgent) -> list:
+    """返回当前 Agent 实际可见的 skills。"""
+    if "read_local_file" not in agent.tools:
+        return []
+    return load_skills(
+        skills_path=agent.skills_path,
+        enabled_only=True,
+        available_skills=agent.available_skills,
+    )
+
+
+def skills_summary(agent: ReActAgent) -> str:
+    """返回适合启动页展示的 skills 摘要。"""
+    skills = get_loaded_skills(agent)
+    if not skills:
+        return "loaded_skills=0"
+    names = ", ".join(skill.name for skill in skills)
+    return f"loaded_skills={len(skills)} [{names}]"
+
+
+def print_skills(agent: ReActAgent) -> None:
+    """打印当前 Agent 已加载的 skills 详情。"""
+    skills = get_loaded_skills(agent)
+    if not skills:
+        print("当前未加载任何 skills。")
+        return
+
+    print(f"当前已加载 {len(skills)} 个 skill：")
+    for index, skill in enumerate(skills, 1):
+        print(f"{index}. {skill.name} ({skill.category})")
+        print(f"   path: {skill.file_path}")
+        print(f"   desc: {skill.description}")
+
+
 def config_summary(config: PlaygroundConfig, agent: ReActAgent | None = None) -> str:
     base_url = getattr(getattr(agent, "llm", None), "base_url", "(unknown)")
     model = getattr(getattr(agent, "llm", None), "model", "(unknown)")
@@ -193,9 +229,10 @@ def print_welcome(config: PlaygroundConfig, agent: ReActAgent) -> None:
     print("learning-agent Playground")
     print("=" * 72)
     print(config_summary(config, agent))
+    print(skills_summary(agent))
     print()
     print("输入你的任务后回车即可执行。")
-    print("输入 :help 查看命令，输入 :examples 查看推荐测试任务。")
+    print("输入 :help 查看命令，输入 :examples 查看推荐测试任务，输入 :skills 查看已加载 skills。")
     print("默认每次执行后都会重置历史；如需保留上下文，请加 --keep-history")
     print("=" * 72)
 
@@ -306,6 +343,9 @@ def interactive_loop(agent: ReActAgent, config: PlaygroundConfig) -> None:
             continue
         if task == ":config":
             print(f"当前配置: {config_summary(config, agent)}")
+            continue
+        if task == ":skills":
+            print_skills(agent)
             continue
         if task == ":multiline":
             task = read_multiline_task()

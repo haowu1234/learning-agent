@@ -1,6 +1,8 @@
 """Playground 单元测试。"""
 
+import contextlib
 import importlib
+import io
 import os
 import sys
 import types
@@ -111,6 +113,43 @@ class TestPlaygroundHelpers(unittest.TestCase):
     def test_build_registry_includes_read_local_file_tool(self):
         registry = self.playground.build_registry()
         self.assertIn("read_local_file", registry.tool_names)
+
+    def test_get_loaded_skills_returns_builtin_skill(self):
+        agent = self.playground.build_agent(self.playground.PlaygroundConfig())
+
+        skills = self.playground.get_loaded_skills(agent)
+
+        self.assertEqual([skill.name for skill in skills], ["report-from-materials"])
+
+    def test_skills_summary_includes_skill_name(self):
+        agent = self.playground.build_agent(self.playground.PlaygroundConfig())
+
+        summary = self.playground.skills_summary(agent)
+
+        self.assertIn("loaded_skills=1", summary)
+        self.assertIn("report-from-materials", summary)
+
+    def test_print_welcome_shows_skills_summary(self):
+        agent = self.playground.build_agent(self.playground.PlaygroundConfig())
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            self.playground.print_welcome(self.playground.PlaygroundConfig(), agent)
+
+        rendered = output.getvalue()
+        self.assertIn("loaded_skills=1", rendered)
+        self.assertIn(":skills", rendered)
+
+    def test_print_skills_outputs_loaded_skill_details(self):
+        agent = self.playground.build_agent(self.playground.PlaygroundConfig())
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            self.playground.print_skills(agent)
+
+        rendered = output.getvalue()
+        self.assertIn("report-from-materials", rendered)
+        self.assertIn("SKILL.md", rendered)
 
 
 if __name__ == "__main__":
