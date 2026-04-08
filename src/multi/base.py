@@ -67,8 +67,10 @@ class BaseMultiAgent(ABC):
             max_steps=agent_kwargs.pop("max_steps", 10),
             verbose=False,  # 由 MultiAgent 统一控制日志
             system_prompt=self._build_system_prompt(role),
+            available_skills=set(role.skills) if role.skills is not None else None,
         )
         agent._role_name = role.name
+        agent._role_system_prompt = role.system_prompt
         self._agents[role.name] = agent
 
     def get_agent(self, name: str) -> ReActAgent | None:

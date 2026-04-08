@@ -6,8 +6,10 @@
 
 import os
 import sys
+import tempfile
 import types
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -39,6 +41,7 @@ from src.agent import ReActAgent, SUPPORTED_MODES
 from src.memory.history import ConversationHistory
 from src.tools.base import ToolRegistry
 from src.tools.calculator import CalculatorTool
+from src.tools.read_local_file import ReadLocalFileTool
 from src.tools.search import SearchTool
 from src.tools.weather import WeatherTool
 
@@ -303,6 +306,74 @@ class TestReActAgentModes(unittest.TestCase):
         self.assertEqual(result, "直接执行结果。")
         self.assertEqual(len(fake_llm.simple_calls), 2)
         self.assertEqual(len(fake_llm.chat_calls), 1)
+
+    def test_function_calling_injects_skills_prompt_when_read_tool_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp)
+            skills_root = project_root / "skills"
+            skill_dir = skills_root / "public" / "demo-skill"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\n"
+                "name: demo-skill\n"
+                "description: 演示技能\n"
+                "---\n\n"
+                "# Demo\n",
+                encoding="utf-8",
+            )
+
+            registry = ToolRegistry()
+            registry.register(ReadLocalFileTool(project_root=project_root))
+            fake_llm = FakeLLM(chat_responses=["最终回答"])
+            agent = ReActAgent(
+                llm=fake_llm,
+                tool_registry=registry,
+                mode="function_calling",
+                verbose=False,
+                skills_path=skills_root,
+            )
+
+            agent.run("请处理这个技能相关任务")
+
+        system_prompt = fake_llm.chat_calls[0]["messages"][0]["content"]
+        self.assertIn("<skill_system>", system_prompt)
+        self.assertIn("demo-skill", system_prompt)
+        self.assertIn("read_local_file", system_prompt)
+
+    def test_run_with_trace_can_execute_read_local_file_tool(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp)
+            target = project_root / "materials" / "brief.txt"
+            target.parent.mkdir(parents=True)
+            target.write_text("第一行\n第二行\n第三行\n", encoding="utf-8")
+
+            registry = ToolRegistry()
+            registry.register(ReadLocalFileTool(project_root=project_root))
+            fake_llm = FakeLLM(
+                chat_responses=[
+                    _FakeResponse(tool_calls=[
+                        _FakeToolCall(
+                            "call_read_1",
+                            "read_local_file",
+                            '{"path": "materials/brief.txt", "start_line": 2, "max_lines": 1}',
+                        )
+                    ]),
+                    _FakeResponse(content="已读取材料并完成总结。"),
+                ]
+            )
+            agent = ReActAgent(
+                llm=fake_llm,
+                tool_registry=registry,
+                mode="function_calling",
+                verbose=False,
+            )
+
+            result = agent.run_with_trace("先读取本地材料，再总结")
+
+        self.assertEqual(result.final_answer, "已读取材料并完成总结。")
+        self.assertEqual(len(result.tool_traces), 1)
+        self.assertEqual(result.tool_traces[0].tool_name, "read_local_file")
+        self.assertIn("第二行", result.tool_traces[0].observation)
 
 
 if __name__ == "__main__":

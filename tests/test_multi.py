@@ -11,9 +11,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import unittest
 
+from src.multi.base import BaseMultiAgent
 from src.multi.message import Message, MessageType
 from src.multi.shared_state import SharedState
 from src.multi.roles import AgentRole, get_role, ROLES
+from src.tools.base import ToolRegistry
+from src.tools.calculator import CalculatorTool
+from src.tools.read_local_file import ReadLocalFileTool
 
 
 class TestMessage(unittest.TestCase):
@@ -128,6 +132,32 @@ class TestAgentRole(unittest.TestCase):
             self.assertEqual(role.name, name)
             self.assertTrue(len(role.description) > 0)
             self.assertTrue(len(role.system_prompt) > 0)
+
+
+class StubMultiAgent(BaseMultiAgent):
+    def run(self, task: str) -> str:
+        return task
+
+
+class TestBaseMultiAgentSkillWiring(unittest.TestCase):
+    def test_add_agent_passes_role_skills_and_role_prompt(self):
+        registry = ToolRegistry()
+        registry.register(ReadLocalFileTool())
+        multi_agent = StubMultiAgent(llm=object(), tool_registry=registry, verbose=False)
+        role = AgentRole(
+            name="skill_user",
+            description="uses skills",
+            system_prompt="你是一个会用 skills 的角色。",
+            tools=["read_local_file"],
+            skills=["report-from-materials"],
+        )
+
+        multi_agent.add_agent(role)
+        agent = multi_agent.get_agent("skill_user")
+
+        self.assertIsNotNone(agent)
+        self.assertEqual(agent.available_skills, {"report-from-materials"})
+        self.assertEqual(agent._role_system_prompt, role.system_prompt)
 
 
 class TestPipelineStep(unittest.TestCase):

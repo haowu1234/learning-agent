@@ -108,6 +108,10 @@ class TestPlaygroundHelpers(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.playground.apply_runtime_updates(agent, config, ":set unknown=1")
 
+    def test_build_registry_includes_read_local_file_tool(self):
+        registry = self.playground.build_registry()
+        self.assertIn("read_local_file", registry.tool_names)
+
 
 if __name__ == "__main__":
     unittest.main()

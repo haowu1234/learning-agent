@@ -17,6 +17,7 @@ class AgentRole:
     description: str
     system_prompt: str
     tools: list[str] = field(default_factory=list)
+    skills: list[str] | None = None
 
     def __repr__(self) -> str:
         return f"AgentRole(name={self.name!r}, tools={self.tools})"
@@ -77,7 +78,7 @@ ROLES: dict[str, AgentRole] = {
             "4. 评估整体质量并给出评分（1-10）\n\n"
             "要求：评审要客观公正，建议要具体可操作。"
         ),
-        tools=[],
+        tools=["read_local_file"],
     ),
     "python_expert": AgentRole(
         name="python_expert",
@@ -89,7 +90,7 @@ ROLES: dict[str, AgentRole] = {
             "3. 提供最佳实践和代码建议\n\n"
             "要求：观点要有技术深度，论述要专业。"
         ),
-        tools=["search"],
+        tools=["search", "read_local_file"],
     ),
     "go_expert": AgentRole(
         name="go_expert",
@@ -101,7 +102,7 @@ ROLES: dict[str, AgentRole] = {
             "3. 提供最佳实践和代码建议\n\n"
             "要求：观点要有技术深度，论述要专业。"
         ),
-        tools=["search"],
+        tools=["search", "read_local_file"],
     ),
 }
 

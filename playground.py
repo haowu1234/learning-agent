@@ -17,6 +17,7 @@ from src.agent.react import ReActAgent
 from src.llm import LLMClient
 from src.tools.base import ToolRegistry
 from src.tools.calculator import CalculatorTool
+from src.tools.read_local_file import ReadLocalFileTool
 from src.tools.search import SearchTool
 from src.tools.weather import WeatherTool
 
@@ -67,6 +68,7 @@ def build_registry() -> ToolRegistry:
     registry.register(CalculatorTool())
     registry.register(WeatherTool())
     registry.register(SearchTool())
+    registry.register(ReadLocalFileTool())
     return registry
 
 

@@ -5,10 +5,13 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import tempfile
 import unittest
+from pathlib import Path
 
 from src.tools.base import Tool, ToolRegistry
 from src.tools.calculator import CalculatorTool
+from src.tools.read_local_file import ReadLocalFileTool
 from src.tools.weather import WeatherTool
 from src.tools.search import SearchTool
 
@@ -72,6 +75,34 @@ class TestSearchTool(unittest.TestCase):
     def test_unknown_query(self):
         result = self.search.run(query="随机搜索词")
         self.assertIn("搜索", result)
+
+
+class TestReadLocalFileTool(unittest.TestCase):
+    def test_reads_requested_line_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp)
+            target = project_root / "notes.txt"
+            target.write_text("第一行\n第二行\n第三行\n第四行\n", encoding="utf-8")
+            tool = ReadLocalFileTool(project_root=project_root)
+
+            result = tool.run(path="notes.txt", start_line=2, max_lines=2)
+
+        self.assertIn("行范围：2-3 / 共 4 行", result)
+        self.assertIn("   2: 第二行", result)
+        self.assertIn("   3: 第三行", result)
+        self.assertNotIn("第一行", result)
+
+    def test_rejects_paths_outside_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "workspace"
+            project_root.mkdir()
+            outside_file = Path(tmp) / "secret.txt"
+            outside_file.write_text("top secret", encoding="utf-8")
+            tool = ReadLocalFileTool(project_root=project_root)
+
+            result = tool.run(path=str(outside_file))
+
+        self.assertIn("错误：不允许访问工作区外的路径", result)
 
 
 class TestToolRegistry(unittest.TestCase):

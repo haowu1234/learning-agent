@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 from src.agent.prompt import (
@@ -23,6 +24,7 @@ from src.agent.prompt import (
 from src.agent.state import AgentRunResult, PlanExecutionState, StepRun, ToolTrace, VerificationResult
 from src.llm import LLMClient
 from src.memory.history import ConversationHistory
+from src.skills import get_skills_prompt_section
 from src.tools.base import ToolRegistry
 
 SUPPORTED_MODES = ("function_calling", "text_parsing", "plan_and_execute")
@@ -45,6 +47,8 @@ class ReActAgent:
         max_plan_steps: int = 5,
         max_replans: int = 1,
         enable_verifier: bool = True,
+        available_skills: set[str] | None = None,
+        skills_path: str | Path | None = None,
     ):
         """
         Args:
@@ -60,6 +64,8 @@ class ReActAgent:
             max_plan_steps: plan_and_execute 模式下最多规划多少步。
             max_replans: 验证未通过时，最多允许重新规划多少次。
             enable_verifier: 是否在 plan_and_execute 模式下启用结果验收。
+            available_skills: 当前 Agent 可见的 skill 名集合；为 None 时加载全部已发现 skills。
+            skills_path: 自定义 skills 根目录，默认使用项目根目录下的 `skills/`。
         """
         self.llm = llm
         self.tools = tool_registry
@@ -71,6 +77,8 @@ class ReActAgent:
         self.max_plan_steps = max_plan_steps
         self.max_replans = max_replans
         self.enable_verifier = enable_verifier
+        self.available_skills = set(available_skills) if available_skills is not None else None
+        self.skills_path = Path(skills_path).resolve() if skills_path else None
         self.history = ConversationHistory()
 
     def run(self, query: str) -> str:
@@ -103,7 +111,7 @@ class ReActAgent:
 
     def _run_function_calling(self, query: str) -> AgentRunResult:
         """使用 OpenAI Function Calling 模式运行 Agent。"""
-        sys_prompt = self.system_prompt or SYSTEM_PROMPT_FUNCTION_CALLING
+        sys_prompt = self._compose_system_prompt(self.system_prompt or SYSTEM_PROMPT_FUNCTION_CALLING)
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": sys_prompt},
         ]
@@ -507,10 +515,10 @@ class ReActAgent:
 
         if mode == "function_calling":
             base_prompt = self.system_prompt or SYSTEM_PROMPT_FUNCTION_CALLING
-            return f"{base_prompt}\n\n{execution_guidance}"
+            return self._compose_system_prompt(f"{base_prompt}\n\n{execution_guidance}")
 
         base_prompt = self.system_prompt or "你是一个智能助手，可以使用工具完成当前子任务。"
-        return f"{base_prompt}\n\n{execution_guidance}"
+        return self._compose_system_prompt(f"{base_prompt}\n\n{execution_guidance}")
 
     def _summarize_plan_execution(
         self,
@@ -802,8 +810,9 @@ class ReActAgent:
     def _build_text_parsing_system_prompt(self) -> str:
         """构建 text_parsing 模式使用的系统提示词。"""
         if self.system_prompt:
+            base_prompt = self._compose_system_prompt(self.system_prompt)
             return (
-                f"{self.system_prompt}\n\n"
+                f"{base_prompt}\n\n"
                 f"可用工具：\n{self.tools.get_tools_description()}\n\n"
                 "你必须严格按照以下格式回答：\n"
                 "Thought: <你的思考过程>\n"
@@ -814,9 +823,29 @@ class ReActAgent:
                 "Final Answer: <你的最终回答>"
             )
 
-        return SYSTEM_PROMPT_TEXT_PARSING.format(
-            tools_description=self.tools.get_tools_description()
+        return self._compose_system_prompt(
+            SYSTEM_PROMPT_TEXT_PARSING.format(
+                tools_description=self.tools.get_tools_description()
+            )
         )
+
+    def _build_skills_prompt(self) -> str:
+        """在具备本地读取能力时，按需构建 skills 提示片段。"""
+        if "read_local_file" not in self.tools:
+            return ""
+        return get_skills_prompt_section(
+            self.available_skills,
+            skills_path=self.skills_path,
+        )
+
+    def _compose_system_prompt(self, base_prompt: str) -> str:
+        """把基础 system prompt 与 skills 提示拼装为最终系统提示。"""
+        if "<skill_system>" in base_prompt:
+            return base_prompt
+        skills_section = self._build_skills_prompt()
+        if not skills_section:
+            return base_prompt
+        return f"{base_prompt}\n\n{skills_section}"
 
     def _save_to_history(self, query: str, answer: str) -> None:
         """保存一轮完整对话到历史。"""
