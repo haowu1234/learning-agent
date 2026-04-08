@@ -2,7 +2,7 @@
   "servers": [
     {
       "name": "ddg-search",
-      "enabled": false,
+      "enabled": true,
       "transport": "stdio",
       "command": "uvx",
       "args": [
